@@ -34,9 +34,13 @@ class Ship:
         if old_ship is not None:
             self.cannon_cd = old_ship.cannon_cd  # type: int
             self.mine_cd = old_ship.mine_cd  # type: int
+            self.old_spd = old_ship.entity.spd  # type: int
+            self.old_action = old_ship.action  # type: str
         else:
             self.cannon_cd = 0  # type: int
             self.mine_cd = 0  # type: int
+            self.old_spd = -1  # type: int
+            self.old_action = ""  # type: str
 
     def think(self):
         self.cooldown()
@@ -49,21 +53,25 @@ class Ship:
         mines = [x for x in Global.entities if x.type == "MINE"]
         cannonballs = [x for x in Global.entities if x.type == "CANNONBALL"]
 
-        # Fire at enemy
-        # if self.cannon_cd == 0 and enemy_ship is not None and distance(self.entity, enemy_ship) < 10:
-        #     self.target = enemy_ship
-        #     self.move = "FIRE"
-        #     return
-
         # Hunt for barrels
         while len(barrels) > 0:
             barrels = heapq.nsmallest(1, barrels, key=lambda barrel: distance(self.entity, barrel))
             target = max(barrels, key=lambda barrel: barrel.rum)
+            if is_obstacle(target.hex()):
+                barrels.remove(target)
+                continue
             path = find_path(self.entity.hex(), target.hex(), self)
             if path is None:
                 barrels.remove(target)
                 continue
             self.move(path)
+            break
+
+        should_attack = self.action == "WAIT" or (self.old_spd == 0 and self.entity.spd == 0)
+        # Fire at enemy
+        if should_attack and self.cannon_cd == 0 and enemy_ship is not None and distance(self.entity, enemy_ship) < 10:
+            self.target = enemy_ship
+            self.action = "FIRE"
             return
 
         # self.target = Entity("99", "-", self.entity.x + random.randint(0,1), self.entity.y + random.randint(0,1), "", "", "", "")
@@ -230,7 +238,7 @@ def turning_cost(from_dir, to_dir):
 
 def required_rotation(from_dir, to_dir):
     # Returns 0 for right, 1 for left
-    diff_dir = to_dir - from_dir
+    diff_dir = abs(to_dir - from_dir)
     if diff_dir < 3:
         return 1 if to_dir > from_dir else 0
     else:
@@ -284,7 +292,7 @@ def find_path(beg, tar, ship):
     while cur != beg:
         path[came_from[cur]] = cur
         cur = came_from[cur]
-    if ship.entity.id == 0:
+    if ship.entity.id == 2:
         print("TARGET: " + str(tar), file=sys.stderr)
         print("---PATH----", file=sys.stderr)
         for key, value in path.items():
@@ -298,9 +306,7 @@ def is_obstacle(target):
     :type target: Hex
     """
     entity = Global.grid[target.x][target.y]
-    if entity is None:
-        return False
-    if entity.type == "MINE":
+    if entity is not None and entity.type == "MINE":
         return True
     for neighbor in target.neighbors():
         if Global.grid[neighbor.x][neighbor.y] is not None and Global.grid[neighbor.x][neighbor.y].type == "MINE":
