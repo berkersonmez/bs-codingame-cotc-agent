@@ -2,8 +2,18 @@ import heapq
 import random
 import sys
 import math
-from typing import List
+from typing import List, Dict
 
+
+# TODO: Division of labor between ships
+# TODO: Ship behaviour types (attacker, guard, collector)
+# TODO: Avoidance of other ships
+# TODO: Detection and resolution of stuck ships
+# TODO: Avoidance of enemy cannonballs (don't be stationary)
+# TODO: Hunt other ships when no barrels left
+# TODO: (Maybe) Don't hit reward barrel
+# TODO: Don't hit yourself when shooting mines
+# TODO: Fix halting problem when going with speed 2 and need to turn after 3 nodes
 
 # To debug: print("Debug messages...", file=sys.stderr)
 class Entity:
@@ -26,6 +36,12 @@ class Entity:
     def hex(self):
         return Hex(self.x, self.y)
 
+    def front(self):
+        return Hex(self.x, self.y).neighbor(self.ori)
+
+    def back(self):
+        return Hex(self.x, self.y).neighbor(abs(3 - self.ori))
+
 
 class Ship:
     def __init__(self, entity):
@@ -41,6 +57,7 @@ class Ship:
             self.mine_cd = 0  # type: int
             self.old_spd = -1  # type: int
             self.old_action = ""  # type: str
+        self.path = None  #type: Dict[Hex, Hex]
 
     def think(self):
         self.cooldown()
@@ -57,22 +74,34 @@ class Ship:
         while len(barrels) > 0:
             barrels = heapq.nsmallest(1, barrels, key=lambda barrel: distance(self.entity, barrel))
             target = max(barrels, key=lambda barrel: barrel.rum)
-            if is_obstacle(target.hex()):
-                barrels.remove(target)
-                continue
-            path = find_path(self.entity.hex(), target.hex(), self)
+            path = find_path(self.entity.hex(), target.hex(), self.entity)
+            self.path = path
             if path is None:
                 barrels.remove(target)
                 continue
             self.move(path)
             break
 
+        # Clear mines near the path
+        if self.path is not None:
+            for from_hex, to_hex in self.path.items():
+                if distance(self.entity, to_hex) > 10:
+                    break
+                nearby_mine = find_nearby_mine(to_hex)
+                if nearby_mine is not None:
+                    self.target = nearby_mine
+                    self.action = "FIRE"
+                    break
+
         should_attack = self.action == "WAIT" or (self.old_spd == 0 and self.entity.spd == 0)
         # Fire at enemy
-        if should_attack and self.cannon_cd == 0 and enemy_ship is not None and distance(self.entity, enemy_ship) < 10:
-            self.target = enemy_ship
-            self.action = "FIRE"
+        if should_attack and self.cannon_cd == 0 and enemy_ship is not None and distance(self.entity, enemy_ship) < 15:
+            attack_point = calculate_attack(enemy_ship, self.entity)
+            if attack_point is not None and distance(self.entity, attack_point) < 10:
+                self.target = attack_point
+                self.action = "FIRE"
             return
+
 
         # self.target = Entity("99", "-", self.entity.x + random.randint(0,1), self.entity.y + random.randint(0,1), "", "", "", "")
         # self.move = "MOVE"
@@ -182,6 +211,12 @@ class Hex:
     def neighbors(self):
         return [nbr for nbr in [self.neighbor(dirn) for dirn in range(6)] if in_grid(Global.grid, nbr)]
 
+    def front(self, ori):
+        return Hex(self.x, self.y).neighbor(ori)
+
+    def back(self, ori):
+        return Hex(self.x, self.y).neighbor(abs(3 - ori))
+
     def __eq__(self, other):
         return self.x == other.x and self.y == other.y
 
@@ -199,7 +234,7 @@ class Hex:
 
 
 def in_grid(grid, target):
-    return len(grid) > target.x and len(grid[0]) > target.y
+    return len(grid) > target.x > 0 and len(grid[0]) > target.y > 0
 
 
 def distance(target1, target2):
@@ -260,9 +295,10 @@ def heuristic(a, b):
     return distance(a, b)
 
 
-def find_path(beg, tar, ship):
+def find_path(beg, tar, ship_entity):
     """
     A* path-finding implementation
+    :type ship_entity: Entity
     :type beg: Hex
     :type tar: Hex
     """
@@ -277,8 +313,8 @@ def find_path(beg, tar, ship):
         if cur == tar:
             found = True
             break
-        for nxt in [neighbor for neighbor in cur.neighbors() if not is_obstacle(neighbor)]:
-            new_cost = cost_so_far[cur] + cost(cur, nxt, came_from, ship.entity.ori)
+        for nxt in [neighbor for neighbor in cur.neighbors()]:
+            new_cost = cost_so_far[cur] + cost(cur, nxt, came_from, ship_entity.ori)
             if nxt not in cost_so_far or new_cost < cost_so_far[nxt]:
                 cost_so_far[nxt] = new_cost
                 priority = new_cost + heuristic(tar, nxt)
@@ -292,7 +328,7 @@ def find_path(beg, tar, ship):
     while cur != beg:
         path[came_from[cur]] = cur
         cur = came_from[cur]
-    if ship.entity.id == 2:
+    if ship_entity.id == 2:
         print("TARGET: " + str(tar), file=sys.stderr)
         print("---PATH----", file=sys.stderr)
         for key, value in path.items():
@@ -312,6 +348,60 @@ def is_obstacle(target):
         if Global.grid[neighbor.x][neighbor.y] is not None and Global.grid[neighbor.x][neighbor.y].type == "MINE":
             return True
     return False
+
+
+def find_nearby_mine(target):
+    entity = Global.grid[target.x][target.y]
+    if entity is not None and entity.type == "MINE":
+        return entity
+    for neighbor in target.neighbors():
+        if Global.grid[neighbor.x][neighbor.y] is not None and Global.grid[neighbor.x][neighbor.y].type == "MINE":
+            return Global.grid[neighbor.x][neighbor.y]
+    return None
+
+
+def calculate_attack(target_ship, self_ship):
+    # Calculate where to attack to hit the enemy.
+    # - If enemy is near a barrel, find the enemy's approximate path and attack.
+    # - Else, assume enemy will move straight and attack.
+    barrels = [x for x in Global.entities if x.type == "BARREL" and distance(target_ship, x) <= 5]
+    if len(barrels) > 0:
+        barrel = min(barrels, key=lambda x: distance(target_ship, x))
+        path = find_path(target_ship.hex(), barrel.hex(), target_ship)
+        impact_point = calculate_impact_point(target_ship, self_ship.front(), path)
+        if impact_point is not None:
+            return impact_point
+    impact_point = calculate_impact_point_straight(target_ship, self_ship.front())
+    if impact_point is not None:
+        return impact_point
+    return None
+
+
+def calculate_impact_point(target_ship, fire_point, path):
+    turn = 0
+    cur_hex = target_ship.hex()
+    while cur_hex in path and turn < 5:
+        turn = turn + 1
+        cur_hex = path[cur_hex]
+        cball_duration = round(1 + (distance(fire_point, cur_hex)) / 2)
+        if cball_duration == turn:
+            return cur_hex
+    return None
+
+
+def calculate_impact_point_straight(target_ship, fire_point):
+    turn = 0
+    cur_hex = target_ship.hex()
+    while turn < 5:
+        turn = turn + 1
+        next_hex = cur_hex
+        for i in range(target_ship.spd):
+            next_hex = next_hex.front(target_ship.ori)
+        cur_hex = next_hex if in_grid(Global.grid, next_hex) else cur_hex
+        cball_duration = round(1 + (distance(fire_point, cur_hex)) / 2)
+        if cball_duration == turn:
+            return cur_hex
+    return None
 
 
 # endregion
