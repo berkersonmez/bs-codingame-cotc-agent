@@ -2,18 +2,20 @@ import heapq
 import random
 import sys
 import math
+
+from copy import deepcopy
 from typing import List, Dict
 
 
 # TODO: Division of labor between ships
 # TODO: Ship behaviour types (attacker, guard, collector)
 # TODO: Avoidance of other ships
-# TODO: Detection and resolution of stuck ships
+# INPR: Detection and resolution of stuck ships
 # TODO: Avoidance of enemy cannonballs (don't be stationary)
 # TODO: Hunt other ships when no barrels left
 # TODO: (Maybe) Don't hit reward barrel
 # TODO: Don't hit yourself when shooting mines
-# TODO: Fix halting problem when going with speed 2 and need to turn after 3 nodes
+# DONE: Fix halting problem when going with speed 2 and need to turn after 3 nodes
 
 # To debug: print("Debug messages...", file=sys.stderr)
 class Entity:
@@ -52,12 +54,14 @@ class Ship:
             self.mine_cd = old_ship.mine_cd  # type: int
             self.old_spd = old_ship.entity.spd  # type: int
             self.old_action = old_ship.action  # type: str
+            self.old_ori = old_ship.entity.ori  # type: int
         else:
             self.cannon_cd = 0  # type: int
             self.mine_cd = 0  # type: int
             self.old_spd = -1  # type: int
             self.old_action = ""  # type: str
-        self.path = None  #type: Dict[Hex, Hex]
+            self.old_ori = -1  # type: int
+        self.path = None  # type: Dict[AStarAdv.Node, AStarAdv.Node]
 
     def think(self):
         self.cooldown()
@@ -70,24 +74,37 @@ class Ship:
         mines = [x for x in Global.entities if x.type == "MINE"]
         cannonballs = [x for x in Global.entities if x.type == "CANNONBALL"]
 
+        # Turn if we are stuck
+        if self.old_spd == 0 and self.entity.spd == 0:
+            if self.old_action == "FASTER":
+                self.action = "STARBOARD" if random.randint(0, 1) == 0 else "PORT"
+            elif self.old_action == "STARBOARD":
+                self.action = "PORT" if self.old_ori == self.entity.ori else "FASTER"
+            elif self.old_action == "PORT":
+                self.action = "STARBOARD" if self.old_ori == self.entity.ori else "FASTER"
+            return
+
         # Hunt for barrels
-        while len(barrels) > 0:
+        while len(barrels) > 0 and self.entity.spd == 2:
             barrels = heapq.nsmallest(1, barrels, key=lambda barrel: distance(self.entity, barrel))
             target = max(barrels, key=lambda barrel: barrel.rum)
-            path = find_path(self.entity.hex(), target.hex(), self.entity)
-            self.path = path
-            if path is None:
+            astar = AStarAdv(self.entity.hex(), target.hex(), self.entity.ori)
+            astar.find_path()
+            if not astar.found:
                 barrels.remove(target)
                 continue
-            self.move(path)
+            self.move(astar)
             break
+
+        if self.entity.spd != 2:
+            self.action = "FASTER"
 
         # Clear mines near the path
         if self.path is not None:
             for from_hex, to_hex in self.path.items():
-                if distance(self.entity, to_hex) > 10:
+                if distance(self.entity, to_hex.pos) > 10:
                     break
-                nearby_mine = find_nearby_mine(to_hex)
+                nearby_mine = find_nearby_mine(to_hex.pos)
                 if nearby_mine is not None:
                     self.target = nearby_mine
                     self.action = "FIRE"
@@ -101,14 +118,6 @@ class Ship:
                 self.target = attack_point
                 self.action = "FIRE"
             return
-
-
-        # self.target = Entity("99", "-", self.entity.x + random.randint(0,1), self.entity.y + random.randint(0,1), "", "", "", "")
-        # self.move = "MOVE"
-
-        # if self.mine_cd == 0:
-        #     self.move = "MINE"
-        #     return
 
     def cooldown(self):
         self.cannon_cd = self.cannon_cd - 1 if self.cannon_cd > 0 else 0
@@ -136,50 +145,15 @@ class Ship:
         else:
             print("WAIT")
 
-    def move(self, path):
+    def move(self, astar):
+        """
+        :type astar: AStarAdv
+        """
         self.action = "WAIT"
-        next_hex = path[self.entity.hex()]
-        next_dir = direction_between(self.entity.hex(), next_hex)
-        second_hex = path[next_hex] if next_hex in path else None
-        second_dir = direction_between(next_hex, second_hex) if second_hex is not None else None
-        third_hex = path[second_hex] if second_hex is not None and second_hex in path else None
-        third_dir = direction_between(second_hex, third_hex) if third_hex is not None else None
-        if self.entity.spd == 0:
-            # If we are stationary, turn if next dir is different, else get faster
-            if next_dir != self.entity.ori:
-                self.action = "PORT" if required_rotation(self.entity.ori, next_dir) == 1 else "STARBOARD"
-            else:
-                self.action = "FASTER"
-        elif self.entity.spd == 1:
-            # If our speed is one:
-            # - Slow down if need to turn immediately
-            # - Turn if need to turn with distance 1
-            # - Wait if need to turn with distance 2
-            # - Get faster if no need to turn
-            if next_dir != self.entity.ori:
-                print("NEXT_DIR:" + str(next_dir) + " NOW_ORI:" + str(self.entity.ori), file=sys.stderr)
-                self.action = "SLOWER"
-            elif second_dir is not None and second_dir != next_dir:
-                self.action = "PORT" if required_rotation(next_dir, second_dir) == 1 else "STARBOARD"
-            elif third_dir is not None and third_dir != second_dir:
-                self.action = "WAIT"
-            elif third_dir is not None:
-                self.action = "FASTER"
-        elif self.entity.spd == 2:
-            # If our speed is two:
-            # - Slow down if need to turn immediately or with distance 1
-            # - Turn if need to turn with distance 2
-            # - Wait if no need to turn
-            if next_dir != self.entity.ori or (second_dir is not None and second_dir != next_dir):
-                self.action = "SLOWER"
-            elif third_dir is not None and third_dir != second_dir:
-                self.action = "PORT" if required_rotation(second_dir, third_dir) == 1 else "STARBOARD"
-            elif third_dir is not None:
-                self.action = "WAIT"
-            else:
-                self.action = "SLOWER"
+        next_node = astar.path[astar.beg]
+        if next_node.ori != self.entity.ori:
+            self.action = "PORT" if required_rotation(self.entity.ori, next_node.ori) else "STARBOARD"
         return
-
 
 # region HEX GRID LOGIC
 
@@ -233,15 +207,87 @@ class Hex:
         return "(" + str(self.x) + "," + str(self.y) + ")"
 
 
+class AStarAdv:
+    class Node:
+        def __init__(self, pos, ori, astar):
+            self.pos = pos  # type: Hex
+            self.ori = ori  # type: int
+            self.expanded = False
+            self.astar = astar  # type: AStarAdv
+            self.neighbors = []  # type: List[AStarAdv.Node]
+
+        def expand(self):
+            pos = self.pos
+            for i in range(self.astar.spd):
+                pos = self.pos.front(self.ori)
+            if in_grid(Global.grid, pos):
+                self.neighbors.append(AStarAdv.Node(pos, self.ori, self.astar))
+                self.neighbors.append(AStarAdv.Node(pos, rotate(self.ori, 1), self.astar))
+                self.neighbors.append(AStarAdv.Node(pos, rotate(self.ori, -1), self.astar))
+
+        def __eq__(self, other):
+            return self.pos == other.pos
+
+        def __ne__(self, other):
+            return self.pos != other.pos
+
+        def __hash__(self):
+            return hash(self.pos)
+
+        def __lt__(self, other):
+            return self.pos < other.pos
+
+    def __init__(self, beg, end, ori):
+        self.beg = AStarAdv.Node(beg, ori, self)  # type: AStarAdv.Node
+        self.end = end  # type: Hex
+        self.spd = 2  # type: int
+        self.frontier = PriorityQueue()
+        self.frontier.put(self.beg, 0)
+        self.came_from = {self.beg: None}
+        self.cost_so_far = {self.beg: 0}
+        self.found = False
+        self.path = None
+
+    def h(self, from_node):
+        if from_node.pos.front(from_node.ori) == self.end or from_node.pos.back(from_node.ori) == self.end:
+            return 0
+        next_hex = from_node.pos
+        for i in range(self.spd):
+            next_hex = next_hex.front(from_node.ori)
+        return distance(from_node.pos, self.end) + distance(next_hex, self.end)
+
+    def find_path(self):
+        last = None
+        while not self.frontier.empty():
+            cur = self.frontier.get()  # type: AStarAdv.Node
+            if cur.pos == self.end or cur.pos.front(cur.ori) == self.end or cur.pos.back(cur.ori) == self.end:
+                self.found = True
+                last = cur
+                break
+            if not cur.expanded:
+                cur.expand()
+            for nxt in [nbr for nbr in cur.neighbors]:
+                new_cost = self.cost_so_far[cur] + self.spd
+                if nxt not in self.cost_so_far or new_cost < self.cost_so_far[nxt]:
+                    self.cost_so_far[nxt] = new_cost
+                    priority = new_cost + self.h(nxt)
+                    self.frontier.put(nxt, priority)
+                    self.came_from[nxt] = cur
+        if not self.found:
+            return
+        # Construct the path
+        self.path = {}
+        cur = last
+        while cur != self.beg:
+            self.path[self.came_from[cur]] = cur
+            cur = self.came_from[cur]
+
+
 def in_grid(grid, target):
     return len(grid) > target.x > 0 and len(grid[0]) > target.y > 0
 
 
 def distance(target1, target2):
-    """
-    :type target1: Entity
-    :type target2: Entity
-    """
     x1, y1, z1 = offset_to_cube(target1.x, target1.y)
     x2, y2, z2 = offset_to_cube(target2.x, target2.y)
     return cube_distance(x1, y1, z1, x2, y2, z2)
@@ -278,6 +324,15 @@ def required_rotation(from_dir, to_dir):
         return 1 if to_dir > from_dir else 0
     else:
         return 0 if to_dir > from_dir else 1
+
+
+def rotate(from_ori, direction):
+    to_ori = from_ori + direction
+    while to_ori > 5:
+        to_ori = to_ori - 6
+    while to_ori < 0:
+        to_ori = to_ori + 6
+    return to_ori
 
 
 def offset_to_cube(x, y):
@@ -405,6 +460,22 @@ def calculate_impact_point_straight(target_ship, fire_point):
 
 
 # endregion
+
+
+class Mcts:
+    class Node:
+        def __init__(self, parent_node=None):
+            """
+            :type parent_node: Mcts.Node
+            """
+            self.entities = deepcopy(parent_node.entities) if parent_node is not None else None  # type: Mcts.Node
+            self.children = []  # type: List[Mcts.Node]
+            self.total_score = 0  # type: int
+            self.max_score = 0  # type: int
+
+    def __init__(self):
+        self.root = Mcts.Node()
+
 
 class Global:
     me_ship_cnt = 0
